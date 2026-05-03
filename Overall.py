@@ -5,110 +5,106 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 
-st.set_page_config(page_title="REAL Energy Data DACH", layout="wide")
+st.set_page_config(page_title="Reliable Energy Intelligence", layout="wide")
 
-# --- SMARD API KONFIGURATION ---
-# IDs für 15-Minuten Werte (Deutschland/Luxemburg)
+# --- KONFIGURATION ---
 FILTER_IDS = {
-    "Intraday_Preis_15min": 435,
-    "PV_Erzeugung_15min": 122,
-    "Wind_Onshore_15min": 125,
-    "Wind_Offshore_15min": 123,
-    "Netzlast_15min": 438
+    "Intraday_Preis": 435, # 15-min
+    "PV_Erzeugung": 122,   # 15-min
+    "Wind_Onshore": 125,   # 15-min
+    "Netzlast": 438        # 15-min
 }
 
-
-@st.cache_data(ttl=1800)  # 30 Min Cache
-def fetch_smard_data(filter_id, days_back=7):
+@st.cache_data(ttl=3600)
+def fetch_smard_data_safe(filter_id, days_back=3):
+    """Holt Daten mit robustem Fehlerhandling"""
     end_ts = int(datetime.now().timestamp() * 1000)
     start_ts = int((datetime.now() - timedelta(days=days_back)).timestamp() * 1000)
-
     url = f"https://www.smard.de/cache/filter/data/{filter_id}/DE/ALL/{start_ts}/{end_ts}.json"
+    
     try:
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, timeout=20) # Erhöhter Timeout
         if response.status_code == 200:
-            series = response.json()['series']
-            df = pd.DataFrame(series, columns=['Timestamp', f'Value_{filter_id}'])
+            json_data = response.json().get('series', [])
+            if not json_data:
+                return pd.DataFrame()
+            df = pd.DataFrame(json_data, columns=['Timestamp', f'Value_{filter_id}'])
             df['Timestamp'] = pd.to_datetime(df['Timestamp'], unit='ms')
             return df
     except Exception as e:
-        st.error(f"Fehler bei ID {filter_id}: {e}")
+        return pd.DataFrame() # Leeres DF bei Fehler
     return pd.DataFrame()
 
+# --- HAUPTPROGRAMM ---
+st.title("🛡 Robust Energy Intelligence OS")
+st.sidebar.header("Abfrage-Parameter")
+days = st.sidebar.slider("Zeitraum (Tage)", 1, 7, 2)
 
-# --- DATEN LADEN & MERGEN ---
-st.title("🔌 REAL-TIME Energy Intelligence (SMARD Data)")
-st.info("Datenquelle: Bundesnetzagentur (SMARD.de) | Auflösung: 15 Minuten")
+if st.sidebar.button("Daten manuell aktualisieren"):
+    st.cache_data.clear()
 
-with st.spinner('Lade echte Marktdaten...'):
-    # Alle Datenreihen abrufen
-    days = st.sidebar.slider("Zeitraum (Tage)", 1, 14, 3)
+with st.spinner('Verbinde mit SMARD-Servern...'):
+    # Einzelabfragen
+    df_price = fetch_smard_data_safe(FILTER_IDS["Intraday_Preis"], days)
+    df_pv = fetch_smard_data_safe(FILTER_IDS["PV_Erzeugung"], days)
+    df_wind = fetch_smard_data_safe(FILTER_IDS["Wind_Onshore"], days)
+    df_load = fetch_smard_data_safe(FILTER_IDS["Netzlast"], days)
 
-    df_price = fetch_smard_data(FILTER_IDS["Intraday_Preis_15min"], days)
-    df_pv = fetch_smard_data(FILTER_IDS["PV_Erzeugung_15min"], days)
-    df_wind_on = fetch_smard_data(FILTER_IDS["Wind_Onshore_15min"], days)
-    df_wind_off = fetch_smard_data(FILTER_IDS["Wind_Offshore_15min"], days)
-    df_load = fetch_smard_data(FILTER_IDS["Netzlast_15min"], days)
+# --- DATEN-FUSION (SICHERER WEG) ---
+data_frames = []
+if not df_price.empty: data_frames.append(df_price.set_index('Timestamp'))
+if not df_pv.empty: data_frames.append(df_pv.set_index('Timestamp'))
+if not df_wind.empty: data_frames.append(df_wind.set_index('Timestamp'))
+if not df_load.empty: data_frames.append(df_load.set_index('Timestamp'))
 
-    # Daten zusammenführen (Outer Join auf Timestamp)
-    try:
-        main_df = df_price.merge(df_pv, on='Timestamp', how='outer')
-        main_df = main_df.merge(df_wind_on, on='Timestamp', how='outer')
-        main_df = main_df.merge(df_wind_off, on='Timestamp', how='outer')
-        main_df = main_df.merge(df_load, on='Timestamp', how='outer')
-        main_df = main_df.sort_values('Timestamp').dropna()
+if len(data_frames) > 0:
+    # Kombinieren aller verfügbaren Daten
+    main_df = pd.concat(data_frames, axis=1).sort_index().reset_index()
+    main_df.columns = ['Timestamp'] + [col for col in main_df.columns if col != 'Timestamp']
+    
+    # Benennung der Spalten basierend auf vorhandenen Daten
+    col_mapping = {
+        f'Value_{FILTER_IDS["Intraday_Preis"]}': 'Preis_EUR',
+        f'Value_{FILTER_IDS["PV_Erzeugung"]}': 'PV_MW',
+        f'Value_{FILTER_IDS["Wind_Onshore"]}': 'Wind_MW',
+        f'Value_{FILTER_IDS["Netzlast"]}': 'Last_MW'
+    }
+    main_df = main_df.rename(columns=col_mapping)
+    
+    # KPIs anzeigen
+    cols = st.columns(len(main_df.columns)-1)
+    for i, col_name in enumerate(main_df.columns[1:]):
+        val = main_df[col_name].iloc[-1] if not main_df[col_name].dropna().empty else 0
+        cols[i].metric(col_name, f"{val:.2f}")
 
-        # Spaltennamen vereinfachen
-        main_df.columns = ['Timestamp', 'Preis_EUR_MWh', 'PV_MW', 'Wind_On_MW', 'Wind_Off_MW', 'Netzlast_MW']
-    except:
-        st.error("Daten konnten nicht synchronisiert werden. Evtl. API-Zeitüberschreitung.")
-        st.stop()
+    # --- GRAFIK ---
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    
+    if 'Preis_EUR' in main_df.columns:
+        fig.add_trace(go.Scatter(x=main_df['Timestamp'], y=main_df['Preis_EUR'], 
+                                 name="Preis (€/MWh)", line=dict(color='#FF4B4B', shape='hv')), secondary_y=False)
+    
+    if 'PV_MW' in main_df.columns:
+        fig.add_trace(go.Scatter(x=main_df['Timestamp'], y=main_df['PV_MW'], 
+                                 name="PV (MW)", fill='tozeroy', line=dict(width=0, color='gold')), secondary_y=True)
 
-# --- KPIs ---
-k1, k2, k3, k4 = st.columns(4)
-k1.metric("Ø Intraday-Preis", f"{main_df['Preis_EUR_MWh'].mean():.2f} €")
-k2.metric("Min. Preis (Negativ?)", f"{main_df['Preis_EUR_MWh'].min():.2f} €")
-k3.metric("Max. PV Peak", f"{main_df['PV_MW'].max():.0f} MW")
-k4.metric("Aktuelle Netzlast", f"{main_df['Netzlast_MW'].iloc[-1]:.0f} MW")
+    if 'Last_MW' in main_df.columns:
+        fig.add_trace(go.Scatter(x=main_df['Timestamp'], y=main_df['Last_MW'], 
+                                 name="Netzlast (MW)", line=dict(color='white', dash='dot')), secondary_y=True)
 
-# --- GRAFIK: GEGENÜBERSTELLUNG ---
-fig = make_subplots(specs=[[{"secondary_y": True}]])
+    fig.update_layout(template="plotly_dark", hovermode="x unified", height=600)
+    fig.update_yaxes(title_text="Preis [€]", secondary_y=False)
+    fig.update_yaxes(title_text="Leistung [MW]", secondary_y=True)
+    
+    st.plotly_chart(fig, use_container_width=True)
 
-# Preis (15-min Treppenstufen)
-fig.add_trace(go.Scatter(x=main_df['Timestamp'], y=main_df['Preis_EUR_MWh'],
-                         name="Intraday-Preis (€/MWh)", line=dict(color='#FF4B4B', shape='hv')), secondary_y=False)
-
-# Erzeugung (Gestapelt)
-fig.add_trace(go.Scatter(x=main_df['Timestamp'], y=main_df['PV_MW'],
-                         name="PV-Erzeugung (MW)", fill='tozeroy', line=dict(color='gold', width=0)), secondary_y=True)
-
-fig.add_trace(go.Scatter(x=main_df['Timestamp'], y=main_df['Wind_On_MW'] + main_df['Wind_Off_MW'],
-                         name="Wind Gesamt (MW)", line=dict(color='#00BFFF', width=2)), secondary_y=True)
-
-# Netzlast (Gegenüberstellung Verbrauch)
-fig.add_trace(go.Scatter(x=main_df['Timestamp'], y=main_df['Netzlast_MW'],
-                         name="Netzlast (MW)", line=dict(color='white', dash='dot', width=1)), secondary_y=True)
-
-# Null-Linie für Negativpreise
-fig.add_hline(y=0, line_dash="dash", line_color="white", secondary_y=False)
-
-fig.update_layout(title=f"Echtzeit-Analyse: Preis vs. Erzeugung & Last (Letzte {days} Tage)",
-                  hovermode="x unified", height=600, template="plotly_dark")
-st.plotly_chart(fig, use_container_width=True)
-
-# --- BUSINESS LOGIC ---
-st.divider()
-col1, col2 = st.columns(2)
-
-with col1:
-    st.subheader("💡 Arbitrage & Smart Charging")
-    spread = main_df['Preis_EUR_MWh'].max() - main_df['Preis_EUR_MWh'].min()
-    st.write(f"Der Preis-Spread im gewählten Zeitraum beträgt **{spread:.2f} €/MWh**.")
-    if main_df['Preis_EUR_MWh'].min() < 0:
-        st.warning("ACHTUNG: Es traten negative Preise auf. Ideales Ladefenster!")
-
-with col2:
-    st.subheader("📈 Korrelations-Check")
-    corr_pv = main_df['Preis_EUR_MWh'].corr(main_df['PV_MW'])
-    st.write(f"Korrelation PV zu Preis: **{corr_pv:.2f}**")
-    st.write("(Werte nahe -1 zeigen: PV drückt den Preis massiv)")
+    # --- EXPERTEN-KPI: NEGATIVPREIS-CHECK ---
+    if 'Preis_EUR' in main_df.columns:
+        neg_data = main_df[main_df['Preis_EUR'] < 0]
+        if not neg_data.empty:
+            st.warning(f"🚨 Achtung: {len(neg_data)} negative 15-Minuten-Intervalle gefunden!")
+            st.dataframe(neg_data[['Timestamp', 'Preis_EUR']].tail(10))
+else:
+    st.error("Die API hat keine Daten geliefert. Bitte Zeitraum verringern oder später versuchen.")
+    if st.button("Demo-Modus aktivieren"):
+        st.info("Hier könnten wir jetzt simulierte Daten einblenden.")
