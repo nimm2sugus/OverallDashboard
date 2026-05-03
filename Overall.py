@@ -14,7 +14,8 @@ def get_energy_data():
     # Hier würde der API Call stehen
     # Beispiel-Daten für die Demonstration:
     data = {
-        'Zeit': pd.date_range(start='2023-10-01', periods=24, freq='H'),
+        # Changed 'H' to 'h' for compatibility with newer Pandas versions
+        'Zeit': pd.date_range(start='2023-10-01', periods=24, freq='h'),
         'Spotpreis_Euro_MWh': [100, 90, 85, 80, 95, 110, 150, 180, 160, 140, 120, 110, 105, 115, 130, 160, 200, 220, 210, 180, 150, 130, 120, 110],
         'PV_Erzeugung_MW': [0, 0, 0, 0, 0, 5, 20, 50, 100, 150, 180, 200, 190, 160, 120, 80, 30, 5, 0, 0, 0, 0, 0, 0]
     }
