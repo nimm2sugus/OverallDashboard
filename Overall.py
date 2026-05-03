@@ -4,121 +4,89 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import os
 
-st.set_page_config(page_title="re cap Energy Intelligence", layout="wide")
-st.title("📊 Energy Intelligence Hub | re cap")
+st.set_page_config(page_title="re cap Intelligence OS", layout="wide")
+st.title("📊 Energy Market Intelligence OS")
 
 @st.cache_data
-def load_all_csv_files():
-    # Suche alle CSV-Dateien im Verzeichnis
-    files = [f for f in os.listdir('.') if f.lower().endswith('.csv') and not f.startswith('.')]
-    
-    if not files:
-        return pd.DataFrame(), []
+def load_data_simple():
+    # Suche alle CSV-Dateien
+    files = [f for f in os.listdir('.') if f.lower().endswith('.csv') and len(f) > 5]
+    if not files: return None, {}
 
     all_dfs = []
-    debug_info = []
+    structure = {} # Speichert Dateiname -> Liste der Spalten
 
     for file in files:
         df = None
-        # Probiere die drei gängigsten Kodierungen für SMARD-Daten
-        for enc in ['utf-8-sig', 'utf-16', 'latin-1']:
+        # Probiere Encodings (UTF-16 ist oft der Grund für Fehler bei 15min-Daten)
+        for enc in ['utf-16', 'utf-8-sig', 'latin-1', 'cp1252']:
             try:
-                # Wir suchen die Kopfzeile (diejenige mit den meisten Semikolons)
-                with open(file, 'r', encoding=enc) as f:
-                    lines = f.readlines()
+                # Automatisches Trennzeichen (sep=None) erkennt ; , oder Tab
+                temp_df = pd.read_csv(file, sep=None, engine='python', encoding=enc, decimal=',', on_bad_lines='skip')
                 
-                # Finde die Zeile, die wahrscheinlich der Header ist (enthält Datum oder Zeit)
-                header_idx = 0
-                for i, line in enumerate(lines[:15]):
-                    if ";" in line and any(keyword in line for keyword in ["Datum", "Anfang", "Zeit", "Date"]):
-                        header_idx = i
-                        break
+                # Suche die Zeile, in der "Datum" steht, falls Metadaten drüber sind
+                if 'Datum' not in temp_df.columns:
+                    for i in range(1, 15):
+                        retry_df = pd.read_csv(file, sep=None, engine='python', encoding=enc, decimal=',', skiprows=i)
+                        if 'Datum' in retry_df.columns:
+                            temp_df = retry_df
+                            break
                 
-                # Einlesen
-                temp_df = pd.read_csv(file, sep=';', decimal=',', skiprows=header_idx, encoding=enc, on_bad_lines='skip')
-                
-                # Spalten säubern
-                temp_df.columns = [str(c).strip() for c in temp_df.columns]
-                
-                if 'Datum' in temp_df.columns and 'Anfang' in temp_df.columns:
-                    # Zeitstempel erstellen
+                if 'Datum' in temp_df.columns:
+                    # Zeitstempel bauen
                     temp_df['Timestamp'] = pd.to_datetime(temp_df['Datum'] + ' ' + temp_df['Anfang'], dayfirst=True, errors='coerce')
                     temp_df = temp_df.dropna(subset=['Timestamp'])
                     
-                    # Dateiname als Präfix nutzen, um Spalten unterscheidbar zu machen
+                    # Spaltennamen säubern und mit Dateiname kennzeichnen
                     prefix = file.split('_202')[0]
                     val_cols = [c for c in temp_df.columns if c not in ['Datum', 'Anfang', 'Ende', 'Timestamp']]
                     
-                    # Umbenennen: Dateiname + Original-Header
-                    new_names = {c: f"{prefix} > {c}" for c in val_cols}
+                    # Mapping für die Sidebar
+                    new_names = {c: f"{prefix} | {c}" for c in val_cols}
                     temp_df = temp_df.rename(columns=new_names)
+                    structure[prefix] = list(new_names.values())
                     
                     all_dfs.append(temp_df[['Timestamp'] + list(new_names.values())].set_index('Timestamp'))
-                    debug_info.append(f"✅ {file} geladen ({len(temp_df)} Zeilen)")
                     df = temp_df
                     break
-            except Exception as e:
+            except:
                 continue
-        
-        if df is None:
-            debug_info.append(f"❌ {file} konnte nicht gelesen werden.")
-
-    if not all_dfs:
-        return pd.DataFrame(), debug_info
-
-    # Zusammenführen und fehlende Werte (bei 1h vs 15min) auffüllen
-    combined = pd.concat(all_dfs, axis=1).sort_index().ffill(limit=3).reset_index()
-    return combined, debug_info
-
-# --- DATEN LADEN ---
-df, debug_log = load_all_csv_files()
-
-# --- SIDEBAR DIAGNOSE ---
-with st.sidebar:
-    st.header("🛠 System-Status")
-    for log in debug_log:
-        st.write(log)
-    if st.button("Cache leeren"):
-        st.cache_data.clear()
-        st.rerun()
-
-# --- HAUPTTEIL ---
-if not df.empty:
-    st.sidebar.divider()
-    all_columns = [c for c in df.columns if c != 'Timestamp']
     
-    st.sidebar.subheader("Daten auswählen")
-    selected_metrics = st.sidebar.multiselect(
-        "Wähle Original-Spalten aus:", 
-        options=all_columns,
-        default=all_columns[:1]
-    )
+    if not all_dfs: return None, {}
+    
+    # Alles zusammenführen & Lücken (bei 1h-Daten) füllen
+    combined = pd.concat(all_dfs, axis=1).sort_index().ffill(limit=3).reset_index()
+    return combined, structure
+
+# --- UI LOGIK ---
+df, structure = load_data_simple()
+
+if df is not None:
+    st.sidebar.header("📂 Datei- & Spaltenauswahl")
+    selected_metrics = []
+    
+    # Hierarchischer Filter: Datei -> Spalten
+    for file_group, columns in structure.items():
+        with st.sidebar.expander(f"📄 {file_group}"):
+            for col in columns:
+                clean_name = col.split(" | ")[1] # Zeige nur den Original-Header im UI
+                if st.checkbox(clean_name, key=col):
+                    selected_metrics.append(col)
 
     if selected_metrics:
+        # Grafik
         fig = make_subplots(specs=[[{"secondary_y": True}]])
-        
         for m in selected_metrics:
-            # MW/Last/Leistung auf die rechte Achse, alles andere (Preise) nach links
-            is_right_axis = any(x in m.lower() for x in ["mw", "verbrauch", "last", "leistung"])
-            
-            fig.add_trace(
-                go.Scatter(x=df['Timestamp'], y=df[m], name=m, 
-                           line=dict(shape='hv' if not is_right_axis else 'linear')),
-                secondary_y=is_right_axis
-            )
-
+            # MW/Leistung rechts, Preise links
+            is_right = any(x in m.lower() for x in ["mw", "verbrauch", "last", "leistung", "erzeugung"])
+            fig.add_trace(go.Scatter(x=df['Timestamp'], y=df[m], name=m, 
+                                     line=dict(shape='hv' if not is_right else 'linear')), 
+                          secondary_y=is_right)
+        
         fig.update_layout(template="plotly_dark", hovermode="x unified", height=700,
                           legend=dict(orientation="h", y=1.08))
-        fig.update_yaxes(title_text="Preis / Basiswerte", secondary_y=False)
-        fig.update_yaxes(title_text="Leistung / Volumen [MW]", secondary_y=True)
-        
         st.plotly_chart(fig, use_container_width=True)
-        
-        with st.expander("Tabellen-Ansicht"):
-            st.dataframe(df)
     else:
-        st.info("Bitte wähle in der Sidebar die Spalten aus, die du im Diagramm sehen möchtest.")
-
+        st.info("Wähle links in der Sidebar Dateien aus und hake die gewünschten Spalten an.")
 else:
-    st.error("Es wurden keine gültigen Daten gefunden.")
-    st.write("Gefundene Dateien im Repo:", os.listdir('.'))
+    st.error("Keine SMARD-Daten gefunden. Bitte prüfe die Dateien im GitHub-Repo.")
