@@ -2,82 +2,128 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import os
+import io
 
-st.set_page_config(page_title="re cap Energy Hub", layout="wide")
-st.title("⚡ re cap Energy Intelligence")
+st.set_page_config(page_title="re cap Intelligence Hub", layout="wide")
+st.title("🛡️ Energy Market Intelligence OS")
 
-def load_data():
-    # Suche alle CSV-Dateien im Ordner
-    files = [f for f in os.listdir('.') if f.lower().endswith('.csv')]
-    all_dfs = []
-    
-    for f in files:
+def robust_load_csv(file_path):
+    """Liest SMARD-Dateien, egal wie sie formatiert sind."""
+    encodings = ['utf-8-sig', 'latin-1', 'cp1252']
+    for enc in encodings:
         try:
-            # 1. Wir finden heraus, in welcher Zeile die Tabelle wirklich startet
-            skip = 0
-            with open(f, 'r', encoding='utf-8', errors='ignore') as temp_f:
-                for i, line in enumerate(temp_f):
-                    if "Datum" in line and "Anfang" in line:
-                        skip = i
-                        break
+            with open(file_path, 'r', encoding=enc) as f:
+                lines = f.readlines()
             
-            # 2. Datei einlesen mit dem gefundenen Header-Start
-            df = pd.read_csv(f, sep=';', decimal=',', skiprows=skip, encoding='utf-8', on_bad_lines='skip')
+            # 1. Header-Suche: Wo fängt die Tabelle an?
+            header_idx = -1
+            sep = ';' # Default
+            for i, line in enumerate(lines[:20]):
+                if "Datum" in line or "Anfang" in line:
+                    header_idx = i
+                    # Trennzeichen-Check: Komma oder Semikolon?
+                    sep = ';' if line.count(';') > line.count(',') else ','
+                    break
             
-            # Spaltennamen säubern (Leerzeichen entfernen)
-            df.columns = df.columns.str.strip()
+            if header_idx == -1: continue
 
-            # Prüfen ob wichtige Spalten da sind
+            # 2. Einlesen mit den erkannten Parametern
+            df = pd.read_csv(file_path, sep=sep, decimal=',', skiprows=header_idx, 
+                             encoding=enc, on_bad_lines='skip', engine='python')
+            
+            # 3. Bereinigung
+            df.columns = [str(c).strip() for c in df.columns]
+            
             if 'Datum' in df.columns and 'Anfang' in df.columns:
-                # Zeitstempel bauen
-                df['Timestamp'] = pd.to_datetime(df['Datum'] + ' ' + df['Anfang'], dayfirst=True)
+                # Zeitstempel-Fussion
+                df['Timestamp'] = pd.to_datetime(df['Datum'] + ' ' + df['Anfang'], dayfirst=True, errors='coerce')
+                df = df.dropna(subset=['Timestamp'])
                 
-                # Nur relevante Spalten behalten (Timestamp + die Werte-Spalte)
-                # Wir nehmen alle Spalten außer die Zeit-Spalten
-                cols_to_keep = [c for c in df.columns if c not in ['Datum', 'Anfang', 'Ende', 'Timestamp']]
+                # Werte-Spalten identifizieren (alles außer Zeit)
+                value_cols = [c for c in df.columns if c not in ['Datum', 'Anfang', 'Ende', 'Timestamp']]
                 
-                # Wir behalten nur den Timestamp und die erste Werte-Spalte für die Übersichtlichkeit
-                if cols_to_keep:
-                    temp_df = df[['Timestamp', cols_to_keep[0]]]
-                    all_dfs.append(temp_df.set_index('Timestamp'))
-        except Exception as e:
-            st.sidebar.warning(f"Konnte {f} nicht laden: {e}")
+                # Spaltennamen mit Dateiname ergänzen, um Duplikate zu vermeiden (z.B. Preis_Intraday vs Preis_DA)
+                short_name = file_path.split('_')[0] if '_' in file_path else "Data"
+                new_names = {c: f"{short_name}_{c}" for c in value_cols}
+                df = df.rename(columns=new_names)
+                
+                return df[['Timestamp'] + list(new_names.values())].set_index('Timestamp')
+        except:
+            continue
+    return None
 
+def get_all_data():
+    files = [f for f in os.listdir('.') if f.lower().endswith('.csv') and len(f) > 5]
+    if not files: return None
+    
+    all_dfs = []
+    for f in files:
+        df = robust_load_csv(f)
+        if df is not None:
+            all_dfs.append(df)
+    
     if all_dfs:
-        # Alles zusammenführen
+        # Zusammenführen über Zeitstempel (Outer Join)
         merged = pd.concat(all_dfs, axis=1).sort_index().reset_index()
         return merged
     return None
 
-# --- APP LOGIK ---
-df = load_data()
+# --- UI LOGIK ---
+with st.spinner("Analysiere Repositories..."):
+    df = get_all_data()
 
 if df is not None and not df.empty:
-    st.success(f"Daten erfolgreich kombiniert! ({len(df)} Zeilen)")
-
-    # Filter für die Spaltenauswahl
+    st.sidebar.success(f"Datenquelle: {len(os.listdir('.'))} Dateien erkannt")
+    
+    # Verfügbare Metriken (Spalten)
     available_cols = [c for c in df.columns if c != 'Timestamp']
+    
+    # Gruppierung nach Dateinamen für bessere Übersicht
     selected_metrics = st.sidebar.multiselect(
-        "Metriken auswählen:", 
-        available_cols, 
-        default=available_cols[:2] if len(available_cols) > 1 else available_cols
+        "Verfügbare Datensätze (Viertelstunde & Stunde):", 
+        available_cols,
+        default=available_cols[:3] if len(available_cols) > 3 else available_cols
     )
 
     if selected_metrics:
-        # Grafik erstellen
+        # Haupt-Grafik
         fig = px.line(df, x='Timestamp', y=selected_metrics, 
-                      title="Marktdaten Vergleich (15-Min / 1-Std)",
+                      title="Markt-Analyse: Erzeugung, Preis & Verbrauch",
                       template="plotly_dark",
-                      color_discrete_sequence=px.colors.qualitative.Pastel)
+                      color_discrete_sequence=px.colors.qualitative.Bold)
         
-        fig.update_layout(hovermode="x unified")
+        fig.update_layout(
+            hovermode="x unified",
+            xaxis_title="Zeitverlauf",
+            yaxis_title="Wert (MW / EUR / MWh)",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
         st.plotly_chart(fig, use_container_width=True)
         
-        # Rohdaten Tabelle
-        with st.expander("Tabellarische Ansicht"):
+        # BUSINESS INSIGHTS
+        st.divider()
+        c1, c2 = st.columns(2)
+        with c1:
+            st.subheader("📊 Statistik (gewählter Zeitraum)")
+            st.write(df[selected_metrics].describe().T[['mean', 'min', 'max']])
+        with c2:
+            st.subheader("💡 Business-Check")
+            # Prüfen ob ein Preis im Datensatz ist
+            price_cols = [c for c in selected_metrics if "preis" in c.lower()]
+            if price_cols:
+                curr_price = price_cols[0]
+                neg_count = len(df[df[curr_price] < 0])
+                st.write(f"Anzahl Negativpreis-Phasen: **{neg_count}**")
+                if neg_count > 0:
+                    st.warning("⚠️ Strategischer Hinweis: Profitabilität von Flexibilitäten hoch!")
+
+        with st.expander("📥 Daten-Vorschau & Export"):
             st.dataframe(df)
-    else:
-        st.info("Bitte wählen Sie mindestens eine Metrik in der Seitenleiste aus.")
+            st.download_button("Als CSV exportieren", df.to_csv(index=False), "energy_intelligence_export.csv")
 else:
-    st.error("Keine gültigen SMARD-Daten gefunden.")
-    st.info("Hinweis: Stellen Sie sicher, dass die CSV-Dateien Trennzeichen ';' enthalten.")
+    st.error("Keine gültigen SMARD-Dateien im Repository gefunden!")
+    st.markdown("""
+    ### Kurze Checkliste:
+    1. Sind die CSV-Dateien im Hauptverzeichnis des GitHub-Repos?
+    2. Haben die Dateien die Endung `.csv`?
+    3. **Tipp:** Lösche alle Dateien, die keine SMARD-Daten sind, um Verwirrung zu vermeiden.
