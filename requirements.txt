@@ -4,3 +4,5 @@ plotly
 openpyxl
 plotly.express
 requests
+plotly.graph_objects
+datetime
