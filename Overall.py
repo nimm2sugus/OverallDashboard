@@ -2,99 +2,77 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from datetime import datetime, timedelta
 
-st.set_page_config(page_title="Energy & LIS Intelligence Pro", layout="wide")
+st.set_page_config(page_title="Pro-Level Energy Dashboard", layout="wide")
 
 # --- DATA LOADING ---
 @st.cache_data
 def load_data():
-    df = pd.read_csv('historical_energy_data.csv')
+    df = pd.read_csv('historical_energy_data_15min.csv')
     df['Timestamp'] = pd.to_datetime(df['Timestamp'])
     return df
 
 df = load_data()
 
-# --- HEADER ---
-st.title("⚡ Sektorenkopplung & Markt-Monitor")
-st.markdown("""
-Dieses Dashboard analysiert die **Wechselwirkung zwischen Erneuerbaren Energien und dem Strommarkt**. 
-Ziel: Optimierung von Ladefenstern für Elektroautos basierend auf EE-Erzeugung.
-""")
+# --- SIDEBAR & FILTER ---
+st.sidebar.title("🔍 Analyse-Filter")
+view_mode = st.sidebar.selectbox("Daten-Auflösung", ["15-Minuten (Intraday)", "Stündlich (Day-Ahead)"])
+date_range = st.sidebar.date_input("Zeitraum wählen", [df['Timestamp'].max() - pd.Timedelta(days=3), df['Timestamp'].max()])
+only_negative = st.sidebar.checkbox("Nur Phasen mit Negativpreisen zeigen")
 
-# --- FILTER ---
-st.sidebar.header("Analyse-Einstellungen")
-timerange = st.sidebar.selectbox("Zeitraum wählen", ["Letzte 7 Tage", "Letzte 30 Tage", "Gesamtansicht"])
+# Daten filtern
+mask = (df['Timestamp'].dt.date >= date_range[0]) & (df['Timestamp'].dt.date <= date_range[1])
+filtered_df = df.loc[mask]
 
-if timerange == "Letzte 7 Tage":
-    plot_df = df.tail(24*7)
-elif timerange == "Letzte 30 Tage":
-    plot_df = df.tail(24*30)
-else:
-    plot_df = df.resample('D', on='Timestamp').mean().reset_index()
+if only_negative:
+    filtered_df = filtered_df[filtered_df['Intraday_15min_Price'] <= 0]
 
-# --- HAUPTGRAFIK: GEGENÜBERSTELLUNG ---
-st.subheader(f"Marktpreis vs. Erneuerbare Einspeisung ({timerange})")
+# --- KPI DASHBOARD ---
+st.title("⚡ Energy & Mobility Profitability Dashboard")
+st.markdown("### 15-Minuten Markt-Analyse für Ladeinfrastruktur (DACH)")
 
-# Erstellung einer Grafik mit zwei Y-Achsen
+kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+
+avg_p = filtered_df['Intraday_15min_Price'].mean()
+neg_hours = len(filtered_df[filtered_df['Intraday_15min_Price'] < 0]) * 0.25 # Da 15 min Takte
+max_spread = filtered_df['Intraday_15min_Price'].max() - filtered_df['Intraday_15min_Price'].min()
+arbitrage_pot = max_spread * 0.5 # Vereinfachte Formel für Einsparung pro MWh
+
+kpi1.metric("Ø Strompreis", f"{avg_p:.2f} €/MWh")
+kpi2.metric("Negativ-Stunden", f"{neg_hours:.1f} h", delta="Kritisch für LIS", delta_color="inverse")
+kpi3.metric("Max. Spread", f"{max_spread:.2f} €", help="Differenz zw. teuerstem und günstigstem Zeitpunkt")
+kpi4.metric("Arbitrage-Potential", f"{arbitrage_pot:.2f} €/MWh", help="Mögliche Ersparnis durch Lastverschiebung")
+
+# --- CHART BEREICH ---
 fig = make_subplots(specs=[[{"secondary_y": True}]])
 
-# 1. Preis (Linke Achse)
-fig.add_trace(
-    go.Scatter(x=plot_df['Timestamp'], y=plot_df['Strompreis_Euro_MWh'], 
-               name="Strompreis (€/MWh)", line=dict(color="#FF4B4B", width=3)),
-    secondary_y=False,
-)
+# Preis-Linie
+price_col = 'Intraday_15min_Price' if view_mode == "15-Minuten (Intraday)" else 'DayAhead_60min_Price'
+fig.add_trace(go.Scatter(x=filtered_df['Timestamp'], y=filtered_df['Intraday_15min_Price'], 
+                         name="Preis 15-min", line=dict(color='#00ffcc', width=2)), secondary_y=False)
 
-# 2. PV-Erzeugung (Rechte Achse - Fläche)
-fig.add_trace(
-    go.Scatter(x=plot_df['Timestamp'], y=plot_df['PV_Erzeugung_MW'], 
-               name="PV-Erzeugung (MW)", fill='tozeroy', line=dict(color="#FFD700", width=0)),
-    secondary_y=True,
-)
+# EE-Anteil (Area Chart)
+fig.add_trace(go.Scatter(x=filtered_df['Timestamp'], y=filtered_df['PV_MW'], 
+                         name="PV-Einspeisung", fill='tozeroy', line=dict(width=0, color='gold'), opacity=0.3), secondary_y=True)
+fig.add_trace(go.Scatter(x=filtered_df['Timestamp'], y=filtered_df['Wind_MW'], 
+                         name="Wind-Einspeisung", line=dict(color='#00bfff', width=1, dash='dot')), secondary_y=True)
 
-# 3. Wind-Erzeugung (Rechte Achse - Linie)
-fig.add_trace(
-    go.Scatter(x=plot_df['Timestamp'], y=plot_df['Wind_Erzeugung_MW'], 
-               name="Wind-Erzeugung (MW)", line=dict(color="#00BFFF", width=2, dash='dot')),
-    secondary_y=True,
-)
+# Null-Linie markieren (Wichtig für Negativpreise)
+fig.add_hline(y=0, line_dash="dash", line_color="red", secondary_y=False)
 
-# Layout-Optimierung
-fig.update_layout(
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-    margin=dict(l=20, r=20, t=50, b=20),
-    hovermode="x unified"
-)
-
-fig.update_yaxes(title_text="<b>Preis</b> [€/MWh]", secondary_y=False)
-fig.update_yaxes(title_text="<b>Erzeugung</b> [MW]", secondary_y=True)
+fig.update_layout(title="Interaktive Strompreis-Analyse vs. EE-Erzeugung", 
+                  hovermode="x unified", height=600, template="plotly_dark")
+fig.update_yaxes(title_text="Preis [€/MWh]", secondary_y=False)
+fig.update_yaxes(title_text="Erzeugung [MW]", secondary_y=True)
 
 st.plotly_chart(fig, use_container_width=True)
 
-# --- BUSINESS ANALYSIS ---
-st.divider()
-col1, col2 = st.columns(2)
+# --- BUSINESS CASE TABELLE ---
+st.subheader("📋 Top Lade-Zeitfenster (Ideale KPIs)")
+best_slots = filtered_df.sort_values(by='Intraday_15min_Price').head(10)
+st.table(best_slots[['Timestamp', 'Intraday_15min_Price', 'EE_Anteil']])
 
-with col1:
-    st.header("📋 Business Insights")
-    avg_price = plot_df['Strompreis_Euro_MWh'].mean()
-    correlation = plot_df['Strompreis_Euro_MWh'].corr(plot_df['PV_Erzeugung_MW'] + plot_df['Wind_Erzeugung_MW'])
-    
-    st.write(f"**Durchschnittspreis:** {avg_price:.2f} €/MWh")
-    st.write(f"**Korrelation EE zu Preis:** {correlation:.2f}")
-    st.info("""
-    *Hinweis:* Eine negative Korrelation (nahe -1.0) zeigt, dass hohe EE-Einspeisung den Preis drückt. 
-    Dies sind die **idealen Ladezeitfenster** für HPC-Parks.
-    """)
-
-with col2:
-    st.header("🚗 LIS-Strategie")
-    low_price_threshold = plot_df['Strompreis_Euro_MWh'].quantile(0.2)
-    st.success(f"**Ziel-Lade-Preis:** < {low_price_threshold:.2f} €/MWh")
-    st.markdown(f"""
-    **Handlungsempfehlung:**
-    In den letzten {timerange} gab es besonders günstige Zeitfenster bei hoher Wind-Einspeisung. 
-    Für Business Developer bedeutet dies: Standorte mit hoher lokaler EE-Erzeugung 
-    profitieren am stärksten von **§14a EnWG** Netzentgeltreduzierungen.
-    """)
+st.info("""
+**Business-Tipp:** Nutze die Phasen mit negativen Preisen, um Flottenkunden von 'Managed Charging' zu überzeugen. 
+Ein Elektroauto mit 100 kWh Batterie könnte in diesen Top-10-Slots theoretisch Geld verdienen oder kostenlos laden.
+""")
