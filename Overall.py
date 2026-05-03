@@ -1,102 +1,100 @@
 import streamlit as st
 import pandas as pd
-import requests
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 
-# --- SEITE SETUP ---
-st.set_page_config(page_title="Energy & EV Intelligence Hub", layout="wide")
+st.set_page_config(page_title="Energy & LIS Intelligence Pro", layout="wide")
 
-# --- DATA ENGINE ---
-@st.cache_data(ttl=3600)
-def fetch_live_data():
-    """Holt die aktuellsten Preise der letzten 7 Tage von SMARD"""
-    end_ts = int(datetime.now().timestamp() * 1000)
-    start_ts = int((datetime.now() - timedelta(days=7)).timestamp() * 1000)
-    url = f"https://www.smard.de/cache/filter/data/410/DE/ALL/{start_ts}/{end_ts}.json"
-    try:
-        r = requests.get(url, timeout=5)
-        if r.status_code == 200:
-            data = r.json()['series']
-            df = pd.DataFrame(data, columns=['Timestamp', 'Strompreis'])
-            df['Timestamp'] = pd.to_datetime(df['Timestamp'], unit='ms')
-            return df
-    except:
-        return pd.DataFrame()
-    return pd.DataFrame()
-
+# --- DATA LOADING ---
 @st.cache_data
-def load_combined_data():
-    # 1. Historie aus CSV laden
-    try:
-        df_hist = pd.read_csv('historical_energy_data.csv')
-        df_hist['Timestamp'] = pd.to_datetime(df_hist['Timestamp'])
-    except:
-        st.error("CSV-Datei nicht gefunden! Bitte historical_energy_data.csv hochladen.")
-        return pd.DataFrame()
+def load_data():
+    df = pd.read_csv('historical_energy_data.csv')
+    df['Timestamp'] = pd.to_datetime(df['Timestamp'])
+    return df
 
-    # 2. Live-Daten dazu holen
-    df_live = fetch_live_data()
-    
-    if not df_live.empty:
-        # Kombinieren & Duplikate entfernen
-        df_combined = pd.concat([df_hist, df_live]).drop_duplicates(subset=['Timestamp'], keep='last')
-    else:
-        df_combined = df_hist
-    
-    return df_combined.sort_values('Timestamp')
+df = load_data()
 
-# --- DASHBOARD LOGIK ---
-df = load_combined_data()
+# --- HEADER ---
+st.title("⚡ Sektorenkopplung & Markt-Monitor")
+st.markdown("""
+Dieses Dashboard analysiert die **Wechselwirkung zwischen Erneuerbaren Energien und dem Strommarkt**. 
+Ziel: Optimierung von Ladefenstern für Elektroautos basierend auf EE-Erzeugung.
+""")
 
-if not df.empty:
-    st.title("⚡ Energy Intelligence & Reporting Hub")
-    st.markdown(f"**Status:** Daten von {df['Timestamp'].min().strftime('%d.%m.%Y')} bis heute ({df['Timestamp'].max().strftime('%d.%m.%Y %H:%M')})")
+# --- FILTER ---
+st.sidebar.header("Analyse-Einstellungen")
+timerange = st.sidebar.selectbox("Zeitraum wählen", ["Letzte 7 Tage", "Letzte 30 Tage", "Gesamtansicht"])
 
-    # METRIKEN (Letzte 24h)
-    last_24h = df.tail(24)
-    avg_p = last_24h['Strompreis'].mean()
-    
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Ø Preis heute", f"{avg_p:.2f} €/MWh")
-    c2.metric("Max Preis heute", f"{last_24h['Strompreis'].max():.2f} €/MWh")
-    c3.metric("Daten-Stabilität", "100% (Hybrid)")
-
-    # VISUALISIERUNG
-    st.subheader("Marktanalyse & Sektorenkopplung")
-    view = st.radio("Zeitraum-Fokus:", ["Gesamt (seit 2023)", "Letzte 30 Tage", "Letzte 7 Tage"], horizontal=True)
-    
-    if view == "Letzte 7 Tage":
-        plot_df = df.tail(24*7)
-    elif view == "Letzte 30 Tage":
-        plot_df = df.tail(24*30)
-    else:
-        plot_df = df.resample('D', on='Timestamp').mean().reset_index() # Tagesmittel für Gesamtansicht
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=plot_df['Timestamp'], y=plot_df['Strompreis'], fill='tozeroy', name="Börsenpreis €/MWh"))
-    fig.update_layout(template="plotly_dark", height=400)
-    st.plotly_chart(fig, use_container_width=True)
-
-    # REPORTING BEREICH
-    st.divider()
-    st.header("📋 Business Development Report Generator")
-    
-    with st.expander("Analyse für Ladeinfrastruktur (TCO Case)"):
-        fleet_energy = st.slider("Täglicher Energiebedarf Flotte (kWh)", 100, 5000, 1000)
-        # Berechnung des Einsparpotenzials (Spread zwischen Max und Min Preis der letzten 7 Tage)
-        recent_7 = df.tail(24*7)
-        potential = (recent_7['Strompreis'].max() - recent_7['Strompreis'].min()) / 1000 * fleet_energy
-        
-        st.write(f"""
-        ### Strategische Empfehlung:
-        Basierend auf den Marktdaten der letzten 7 Tage hätte eine intelligente Steuerung 
-        der Ladevorgänge ein Einsparpotenzial von ca. **{potential:.2f} € pro Tag** gegenüber 
-        einer Ladung zu Peak-Zeiten erzielt.
-        """)
-        
-        if st.download_button("Report als CSV exportieren", df.tail(168).to_csv(), "Wochenreport.csv"):
-            st.balloons()
-
+if timerange == "Letzte 7 Tage":
+    plot_df = df.tail(24*7)
+elif timerange == "Letzte 30 Tage":
+    plot_df = df.tail(24*30)
 else:
-    st.warning("Warte auf Daten-Upload...")
+    plot_df = df.resample('D', on='Timestamp').mean().reset_index()
+
+# --- HAUPTGRAFIK: GEGENÜBERSTELLUNG ---
+st.subheader(f"Marktpreis vs. Erneuerbare Einspeisung ({timerange})")
+
+# Erstellung einer Grafik mit zwei Y-Achsen
+fig = make_subplots(specs=[[{"secondary_y": True}]])
+
+# 1. Preis (Linke Achse)
+fig.add_trace(
+    go.Scatter(x=plot_df['Timestamp'], y=plot_df['Strompreis_Euro_MWh'], 
+               name="Strompreis (€/MWh)", line=dict(color="#FF4B4B", width=3)),
+    secondary_y=False,
+)
+
+# 2. PV-Erzeugung (Rechte Achse - Fläche)
+fig.add_trace(
+    go.Scatter(x=plot_df['Timestamp'], y=plot_df['PV_Erzeugung_MW'], 
+               name="PV-Erzeugung (MW)", fill='tozeroy', line=dict(color="#FFD700", width=0)),
+    secondary_y=True,
+)
+
+# 3. Wind-Erzeugung (Rechte Achse - Linie)
+fig.add_trace(
+    go.Scatter(x=plot_df['Timestamp'], y=plot_df['Wind_Erzeugung_MW'], 
+               name="Wind-Erzeugung (MW)", line=dict(color="#00BFFF", width=2, dash='dot')),
+    secondary_y=True,
+)
+
+# Layout-Optimierung
+fig.update_layout(
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    margin=dict(l=20, r=20, t=50, b=20),
+    hovermode="x unified"
+)
+
+fig.update_yaxes(title_text="<b>Preis</b> [€/MWh]", secondary_y=False)
+fig.update_yaxes(title_text="<b>Erzeugung</b> [MW]", secondary_y=True)
+
+st.plotly_chart(fig, use_container_width=True)
+
+# --- BUSINESS ANALYSIS ---
+st.divider()
+col1, col2 = st.columns(2)
+
+with col1:
+    st.header("📋 Business Insights")
+    avg_price = plot_df['Strompreis_Euro_MWh'].mean()
+    correlation = plot_df['Strompreis_Euro_MWh'].corr(plot_df['PV_Erzeugung_MW'] + plot_df['Wind_Erzeugung_MW'])
+    
+    st.write(f"**Durchschnittspreis:** {avg_price:.2f} €/MWh")
+    st.write(f"**Korrelation EE zu Preis:** {correlation:.2f}")
+    st.info("""
+    *Hinweis:* Eine negative Korrelation (nahe -1.0) zeigt, dass hohe EE-Einspeisung den Preis drückt. 
+    Dies sind die **idealen Ladezeitfenster** für HPC-Parks.
+    """)
+
+with col2:
+    st.header("🚗 LIS-Strategie")
+    low_price_threshold = plot_df['Strompreis_Euro_MWh'].quantile(0.2)
+    st.success(f"**Ziel-Lade-Preis:** < {low_price_threshold:.2f} €/MWh")
+    st.markdown(f"""
+    **Handlungsempfehlung:**
+    In den letzten {timerange} gab es besonders günstige Zeitfenster bei hoher Wind-Einspeisung. 
+    Für Business Developer bedeutet dies: Standorte mit hoher lokaler EE-Erzeugung 
+    profitieren am stärksten von **§14a EnWG** Netzentgeltreduzierungen.
+    """)
